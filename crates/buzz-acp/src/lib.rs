@@ -3378,7 +3378,7 @@ fn spawn_failure_notice(
         let rest = rest.clone();
         let channel_id = batch.channel_id;
         tokio::spawn(async move {
-            pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
+            pool::post_channel_message(&rest, channel_id, &thread_tags, &content).await;
         });
     }
 }
@@ -3587,6 +3587,28 @@ fn handle_prompt_result(
                 outcome = outcome_label,
                 "agent_returned"
             );
+            // Publish the assistant's reply back to the originating channel.
+            // Only channel turns publish: a heartbeat turn has no audience.
+            if let (Some(text), PromptSource::Channel(channel_id), Some(rest)) =
+                (result.reply_text.take(), &result.source, rest_client)
+            {
+                let rest = rest.clone();
+                let channel_id = *channel_id;
+                // Reply into the triggering message's thread. A mention sent
+                // outside any thread yields empty tags, which post as a normal
+                // top-level channel message.
+                let thread = result.reply_thread.take().unwrap_or_default();
+                tracing::debug!(
+                    target: "acp::reply",
+                    channel = %channel_id,
+                    root = ?thread.root_event_id,
+                    parent = ?thread.parent_event_id,
+                    "publishing reply"
+                );
+                tokio::spawn(async move {
+                    pool::post_channel_message(&rest, channel_id, &thread, &text).await;
+                });
+            }
             pool.return_agent(result.agent);
         }
         // Fatal outcomes: the agent subprocess is dead or poisoned — respawn it.

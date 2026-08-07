@@ -240,6 +240,13 @@ pub struct PromptResult {
     pub outcome: PromptOutcome,
     /// Present on failure in Queue mode, for requeue.
     pub batch: Option<FlushBatch>,
+    /// Assistant text produced by this turn, drained from the ACP session.
+    /// `None` for tool-only turns and for any turn that produced no text.
+    pub reply_text: Option<String>,
+    /// NIP-10 thread tags derived from the turn's triggering event, so a
+    /// published reply lands in the same thread the mention came from.
+    /// `None` for heartbeat turns, which have no triggering event.
+    pub reply_thread: Option<crate::queue::ThreadTags>,
 }
 
 /// Whether the prompt came from a channel event or a heartbeat.
@@ -1364,14 +1371,21 @@ fn send_prompt_result(
     source: PromptSource,
     outcome: PromptOutcome,
     batch: Option<FlushBatch>,
+    reply_thread: Option<crate::queue::ThreadTags>,
 ) {
     agent.acp.clear_steer_rx();
+    // Drain unconditionally: the buffer must not survive into the next turn on
+    // this agent, whatever this turn's outcome. handle_prompt_result decides
+    // whether the text is publishable (success only).
+    let reply_text = agent.acp.take_reply_text();
     let _ = result_tx.send(PromptResult {
         agent,
         source,
         turn_id: turn_id.to_owned(),
         outcome,
         batch,
+        reply_text,
+        reply_thread,
     });
 }
 
@@ -1416,6 +1430,39 @@ pub async fn run_prompt_task(
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
         .unwrap_or_default();
+    // Thread anchor for a published reply: the batch's last (most recent)
+    // triggering event. Same anchor spawn_failure_notice uses, so replies and
+    // failure notices land in the same thread. None for heartbeats.
+    // Thread anchor for a published reply. Prefer the most recent event that
+    // @mentions this agent (in All-subscription mode a batch can also contain
+    // plain channel chatter that happened to flush together with the mention);
+    // fall back to the most recent event otherwise. The reply threads under
+    // the anchor itself: root = the anchor's own thread root when it has one
+    // (reply stays in the human's thread), else the anchor event, so a
+    // top-level mention starts a thread rooted at that mention.
+    let agent_pubkey_hex = ctx.rest_client.keys.public_key().to_hex();
+    let reply_thread: Option<crate::queue::ThreadTags> = batch.as_ref().and_then(|b| {
+        let anchor = b
+            .events
+            .iter()
+            .rev()
+            .find(|be| {
+                crate::queue::parse_thread_tags(&be.event)
+                    .mentioned_pubkeys
+                    .iter()
+                    .any(|p| p == &agent_pubkey_hex)
+            })
+            .or_else(|| b.events.last())?;
+        let parsed = crate::queue::parse_thread_tags(&anchor.event);
+        let anchor_id = anchor.event.id.to_hex();
+        let root = parsed.root_event_id.unwrap_or_else(|| anchor_id.clone());
+        Some(crate::queue::ThreadTags {
+            root_event_id: Some(root),
+            parent_event_id: Some(anchor_id),
+            mentioned_pubkeys: parsed.mentioned_pubkeys,
+        })
+    });
+    tracing::debug!(target: "acp::reply", thread = ?reply_thread, "computed reply_thread");
     agent.acp.observe(
         "turn_started",
         serde_json::json!({
@@ -1634,6 +1681,7 @@ pub async fn run_prompt_task(
                             source,
                             PromptOutcome::AgentExited,
                             requeue_batch_if_queue(&ctx, batch),
+                            reply_thread.clone(),
                         );
                         return;
                     }
@@ -1647,6 +1695,7 @@ pub async fn run_prompt_task(
                             source,
                             PromptOutcome::Error(e),
                             requeue_batch_if_queue(&ctx, batch),
+                            reply_thread.clone(),
                         );
                         return;
                     }
@@ -1678,6 +1727,7 @@ pub async fn run_prompt_task(
                             source,
                             PromptOutcome::AgentExited,
                             None,
+                            reply_thread.clone(),
                         );
                         return;
                     }
@@ -1689,6 +1739,7 @@ pub async fn run_prompt_task(
                             source,
                             PromptOutcome::Error(e),
                             None,
+                            reply_thread.clone(),
                         );
                         return;
                     }
@@ -1770,6 +1821,7 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::AgentExited,
                         requeue_batch_if_queue(&ctx, batch),
+                        reply_thread.clone(),
                     );
                     return;
                 }
@@ -1796,6 +1848,7 @@ pub async fn run_prompt_task(
                                 source,
                                 PromptOutcome::AgentExited,
                                 requeue_batch_if_queue(&ctx, batch),
+                                reply_thread.clone(),
                             );
                             return;
                         }
@@ -1814,6 +1867,7 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::Timeout(TimeoutKind::Idle),
                         requeue_batch_if_queue(&ctx, batch),
+                        reply_thread.clone(),
                     );
                     return;
                 }
@@ -1832,6 +1886,7 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::Timeout(TimeoutKind::Hard { recently_active }),
                         requeue_batch_if_queue(&ctx, batch),
+                        reply_thread.clone(),
                     );
                     return;
                 }
@@ -1848,6 +1903,7 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::Error(e),
                         requeue_batch_if_queue(&ctx, batch),
+                        reply_thread.clone(),
                     );
                     return;
                 }
@@ -1929,6 +1985,7 @@ pub async fn run_prompt_task(
             source,
             PromptOutcome::Error(AcpError::Protocol("no batch and no prompt_text".into())),
             None,
+            reply_thread.clone(),
         );
         return;
     };
@@ -2036,6 +2093,7 @@ pub async fn run_prompt_task(
                                     source,
                                     PromptOutcome::Cancelled,
                                     retry_batch,
+                                    reply_thread.clone(),
                                 );
                                 return;
                             }
@@ -2072,6 +2130,7 @@ pub async fn run_prompt_task(
                                     source,
                                     failure.outcome,
                                     failure.retry_batch,
+                                    reply_thread.clone(),
                                 );
                                 return;
                             }
@@ -2127,6 +2186,7 @@ pub async fn run_prompt_task(
                             source,
                             PromptOutcome::Ok(StopReason::EndTurn),
                             None, // turn succeeded — batch was processed, no requeue
+                            reply_thread.clone(),
                         );
                         return;
                     }
@@ -2190,6 +2250,7 @@ pub async fn run_prompt_task(
                 source,
                 PromptOutcome::Ok(stop_reason),
                 None,
+                reply_thread.clone(),
             );
         }
         Err(AcpError::AgentExited) => {
@@ -2212,6 +2273,7 @@ pub async fn run_prompt_task(
                 source,
                 PromptOutcome::AgentExited,
                 requeue_batch_if_queue(&ctx, batch),
+                reply_thread.clone(),
             );
         }
         Err(AcpError::IdleTimeout(_)) => {
@@ -2246,6 +2308,7 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::Timeout(TimeoutKind::Idle),
                         requeue_batch_if_queue(&ctx, batch),
+                        reply_thread.clone(),
                     );
                 }
                 Err(AcpError::AgentExited) => {
@@ -2272,6 +2335,7 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::AgentExited,
                         requeue_batch_if_queue(&ctx, batch),
+                        reply_thread.clone(),
                     );
                 }
                 Err(e) => {
@@ -2297,6 +2361,7 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::Timeout(TimeoutKind::Idle),
                         requeue_batch_if_queue(&ctx, batch),
+                        reply_thread.clone(),
                     );
                 }
             }
@@ -2326,6 +2391,7 @@ pub async fn run_prompt_task(
                 source,
                 PromptOutcome::Timeout(TimeoutKind::Hard { recently_active }),
                 requeue_batch_if_queue(&ctx, batch),
+                reply_thread.clone(),
             );
         }
         Err(e) => {
@@ -2353,6 +2419,7 @@ pub async fn run_prompt_task(
                 source,
                 PromptOutcome::Error(e),
                 requeue_batch_if_queue(&ctx, batch),
+                reply_thread.clone(),
             );
         }
     }
@@ -3869,7 +3936,11 @@ pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str
 /// batch is dead-lettered. Replies into the thread of `thread_tags` when the
 /// triggering event was threaded. Errors are logged and swallowed — the
 /// notice must never take down the main loop.
-pub(crate) async fn post_failure_notice(
+/// Post a plain channel message (kind:9) as the agent, optionally threaded.
+///
+/// Used for both harness failure notices and published assistant replies —
+/// the payload is opaque to this function.
+pub(crate) async fn post_channel_message(
     rest: &crate::relay::RestClient,
     channel_id: Uuid,
     thread_tags: &ThreadTags,
@@ -6036,6 +6107,7 @@ mod tests {
             source,
             PromptOutcome::Error(AcpError::Protocol("simulated session-create error".into())),
             None,
+            reply_thread.clone(),
         );
 
         // Receive the PromptResult back from the channel.
@@ -6094,6 +6166,7 @@ mod tests {
             source,
             PromptOutcome::Ok(StopReason::EndTurn),
             None,
+            reply_thread.clone(),
         );
 
         let mut result = result_rx.recv().await.expect("PromptResult must be sent");

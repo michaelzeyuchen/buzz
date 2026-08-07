@@ -20,6 +20,13 @@ use crate::usage::{TurnUsage, UsageTracker};
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
+/// Upper bound on buffered assistant reply text per turn.
+///
+/// Buzz channel messages are not meant to carry megabytes of prose; this caps
+/// the per-turn `reply_buffer` so a looping agent cannot exhaust memory. Text
+/// beyond the cap is dropped and the truncated prefix is still published.
+const MAX_REPLY_BYTES: usize = 64_000;
+
 /// An MCP server configuration passed to `session/new`.
 ///
 /// Corresponds to the `McpServerStdio` variant in the ACP schema.
@@ -211,6 +218,20 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Accumulated `agent_message_chunk` text for the current turn, and the
+    /// `messageId` it belongs to.
+    ///
+    /// ACP streams assistant text as many small chunks sharing a `messageId`.
+    /// A single turn may emit *several* distinct messages (e.g. a preamble
+    /// before a tool call, then the real answer after it); each carries its own
+    /// `messageId`. Only the final message is the reply, so a new `messageId`
+    /// replaces the buffer rather than appending to it — appending would splice
+    /// unrelated messages into one run-on post.
+    ///
+    /// Drained by [`take_reply_text`](Self::take_reply_text) at turn
+    /// completion; cleared at the start of each `session/prompt` so a
+    /// cancelled or errored turn never leaks text into the next one.
+    reply_buffer: (Option<String>, String),
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -550,6 +571,7 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            reply_buffer: (None, String::new()),
         })
     }
 
@@ -735,6 +757,21 @@ impl AcpClient {
         self.send_request("session/set_model", params).await
     }
 
+    /// Take the assistant text accumulated during the current turn.
+    ///
+    /// Returns `None` when the turn produced no text (tool-only turns, or a
+    /// turn cancelled before any `agent_message_chunk` arrived). Leaves the
+    /// buffer empty so a caller cannot publish the same reply twice.
+    pub fn take_reply_text(&mut self) -> Option<String> {
+        let (_, text) = std::mem::take(&mut self.reply_buffer);
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
     /// Send `session/prompt` with idle-based timeout instead of wall-clock.
     ///
     /// The idle deadline resets on any stdout activity from the agent. The hard
@@ -769,6 +806,10 @@ impl AcpClient {
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
         let params = build_prompt_params(session_id, prompt_blocks);
+        // Clear any residue from a prior turn (cancelled/errored turns never
+        // reach the drain in handle_prompt_result) so replies cannot bleed
+        // across turns.
+        self.reply_buffer = (None, String::new());
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
 
@@ -1733,6 +1774,20 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    // Buffer for publication back to the Buzz channel at turn
+                    // end. A change of messageId starts a new message: reset
+                    // rather than append, so only the turn's final message is
+                    // published. Bounded by MAX_REPLY_BYTES so a runaway agent
+                    // cannot grow this without limit; excess is dropped, not
+                    // truncated mid-message, because a partial reply is still
+                    // worth posting.
+                    let msg_id = update.get("messageId").and_then(|v| v.as_str());
+                    if self.reply_buffer.0.as_deref() != msg_id {
+                        self.reply_buffer = (msg_id.map(str::to_owned), String::new());
+                    }
+                    if self.reply_buffer.1.len() + text.len() <= MAX_REPLY_BYTES {
+                        self.reply_buffer.1.push_str(text);
+                    }
                 }
                 false
             }
