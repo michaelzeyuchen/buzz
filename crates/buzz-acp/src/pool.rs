@@ -6107,7 +6107,7 @@ mod tests {
             source,
             PromptOutcome::Error(AcpError::Protocol("simulated session-create error".into())),
             None,
-            reply_thread.clone(),
+            None,
         );
 
         // Receive the PromptResult back from the channel.
@@ -6166,7 +6166,7 @@ mod tests {
             source,
             PromptOutcome::Ok(StopReason::EndTurn),
             None,
-            reply_thread.clone(),
+            None,
         );
 
         let mut result = result_rx.recv().await.expect("PromptResult must be sent");

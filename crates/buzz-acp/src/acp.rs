@@ -1774,20 +1774,8 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
-                    // Buffer for publication back to the Buzz channel at turn
-                    // end. A change of messageId starts a new message: reset
-                    // rather than append, so only the turn's final message is
-                    // published. Bounded by MAX_REPLY_BYTES so a runaway agent
-                    // cannot grow this without limit; excess is dropped, not
-                    // truncated mid-message, because a partial reply is still
-                    // worth posting.
                     let msg_id = update.get("messageId").and_then(|v| v.as_str());
-                    if self.reply_buffer.0.as_deref() != msg_id {
-                        self.reply_buffer = (msg_id.map(str::to_owned), String::new());
-                    }
-                    if self.reply_buffer.1.len() + text.len() <= MAX_REPLY_BYTES {
-                        self.reply_buffer.1.push_str(text);
-                    }
+                    accumulate_chunk(&mut self.reply_buffer, msg_id, text);
                 }
                 false
             }
@@ -1990,6 +1978,29 @@ impl AcpClient {
 }
 
 /// Build `session/prompt` params from one or more text content blocks.
+/// Append one streamed `agent_message_chunk` to a reply buffer.
+///
+/// A turn may emit several distinct assistant messages (e.g. a preamble before
+/// a tool call, then the answer after it), each with its own `message_id`.
+/// Only the final message is the reply, so a change of `message_id` **resets**
+/// the buffer instead of appending — appending would splice unrelated messages
+/// into one run-on post.
+///
+/// Chunks that would push the buffer past [`MAX_REPLY_BYTES`] are dropped
+/// rather than truncated mid-message: a partial reply is still worth posting,
+/// and the cap stops a looping agent from exhausting memory.
+///
+/// Free-standing (not an `AcpClient` method) so the semantics are unit-testable
+/// without spawning an agent subprocess.
+fn accumulate_chunk(buffer: &mut (Option<String>, String), message_id: Option<&str>, text: &str) {
+    if buffer.0.as_deref() != message_id {
+        *buffer = (message_id.map(str::to_owned), String::new());
+    }
+    if buffer.1.len() + text.len() <= MAX_REPLY_BYTES {
+        buffer.1.push_str(text);
+    }
+}
+
 fn build_prompt_params(session_id: &str, prompt_blocks: &[&str]) -> serde_json::Value {
     let blocks: Vec<serde_json::Value> = prompt_blocks
         .iter()
@@ -4702,5 +4713,56 @@ mod tests {
             msg.contains("sandbox_workspace_write"),
             "error must mention sandbox_workspace_write"
         );
+    }
+
+    // ── reply buffer (accumulate_chunk) ───────────────────────────────────
+
+    /// Chunks sharing a messageId accumulate, as the wire protocol requires:
+    /// ACP streams one assistant message as many small chunks.
+    #[test]
+    fn accumulate_chunk_joins_within_one_message_id() {
+        let mut buf = (None, String::new());
+        accumulate_chunk(&mut buf, Some("msg_a"), "hi ");
+        accumulate_chunk(&mut buf, Some("msg_a"), "there");
+        assert_eq!(buf.1, "hi there");
+        assert_eq!(buf.0.as_deref(), Some("msg_a"));
+    }
+
+    /// A new messageId RESETS the buffer. This is the regression guard for the
+    /// concatenation bug: a turn that emitted a preamble and then the real
+    /// answer published both glued together ("ANSWERpreamble, ANSWER").
+    #[test]
+    fn accumulate_chunk_resets_on_new_message_id() {
+        let mut buf = (None, String::new());
+        accumulate_chunk(&mut buf, Some("msg_a"), "preamble");
+        accumulate_chunk(&mut buf, Some("msg_b"), "answer");
+        assert_eq!(
+            buf,
+            (Some("msg_b".to_owned()), "answer".to_owned()),
+            "a new messageId must replace the buffer, not append to it"
+        );
+    }
+
+    /// Text beyond MAX_REPLY_BYTES is dropped, and the already-buffered prefix
+    /// survives — a looping agent cannot grow the buffer without bound.
+    #[test]
+    fn accumulate_chunk_caps_at_max_reply_bytes() {
+        let mut buf = (None, String::new());
+        accumulate_chunk(&mut buf, Some("big"), "keep");
+        accumulate_chunk(&mut buf, Some("big"), &"x".repeat(MAX_REPLY_BYTES));
+        assert_eq!(
+            buf.1, "keep",
+            "an over-cap chunk is dropped whole; the prefix is retained"
+        );
+        assert!(buf.1.len() <= MAX_REPLY_BYTES);
+    }
+
+    /// A chunk with no messageId is still buffered (treated as its own
+    /// message), so agents that omit the field are not silently dropped.
+    #[test]
+    fn accumulate_chunk_handles_absent_message_id() {
+        let mut buf = (None, String::new());
+        accumulate_chunk(&mut buf, None, "no id");
+        assert_eq!(buf, (None, "no id".to_owned()));
     }
 }

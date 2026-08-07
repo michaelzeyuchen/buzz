@@ -6537,6 +6537,8 @@ mod error_outcome_emission_tests {
             turn_id: "test-turn-id".to_string(),
             outcome,
             batch: None,
+            reply_text: None,
+            reply_thread: None,
         };
 
         handle_prompt_result(
@@ -6703,6 +6705,8 @@ mod error_outcome_emission_tests {
                 turn_id: "test-turn-id".to_string(),
                 outcome,
                 batch: None,
+                reply_text: None,
+                reply_thread: None,
             };
             handle_prompt_result(
                 &mut pool,
@@ -6793,6 +6797,8 @@ mod error_outcome_emission_tests {
                 turn_id: "test-turn-id".to_string(),
                 outcome,
                 batch: Some(batch),
+                reply_text: None,
+                reply_thread: None,
             };
             handle_prompt_result(
                 &mut pool,
@@ -6898,6 +6904,8 @@ mod error_outcome_emission_tests {
                 turn_id: "test-turn-id".to_string(),
                 outcome,
                 batch: Some(batch),
+                reply_text: None,
+                reply_thread: None,
             };
             handle_prompt_result(
                 &mut pool,
@@ -6989,6 +6997,8 @@ mod error_outcome_emission_tests {
                 recently_active: true,
             }),
             batch: Some(batch),
+            reply_text: None,
+            reply_thread: None,
         };
         handle_prompt_result(
             &mut pool,
@@ -7082,6 +7092,8 @@ mod error_outcome_emission_tests {
                 recently_active: true,
             }),
             batch: Some(batch),
+            reply_text: None,
+            reply_thread: None,
         };
         handle_prompt_result(
             &mut pool,
@@ -7196,6 +7208,8 @@ mod error_outcome_emission_tests {
             turn_id: "test-turn-id".to_string(),
             outcome: PromptOutcome::CancelDrainTimeout(grace),
             batch: Some(batch),
+            reply_text: None,
+            reply_thread: None,
         };
 
         handle_prompt_result(
@@ -7328,6 +7342,8 @@ mod error_outcome_emission_tests {
             // `classify_control_cancel_failure` — `handle_prompt_result`
             // never sees one to requeue.
             batch: None,
+            reply_text: None,
+            reply_thread: None,
         };
 
         handle_prompt_result(
@@ -7511,6 +7527,8 @@ mod error_outcome_emission_tests {
             turn_id: "test-turn-id".to_string(),
             outcome: PromptOutcome::Error(auth_error),
             batch: Some(batch),
+            reply_text: None,
+            reply_thread: None,
         };
         handle_prompt_result(
             &mut pool,
@@ -7596,6 +7614,8 @@ mod error_outcome_emission_tests {
             turn_id: "test-turn-id".to_string(),
             outcome: PromptOutcome::Error(usage_error),
             batch: Some(batch),
+            reply_text: None,
+            reply_thread: None,
         };
         handle_prompt_result(
             &mut pool,
