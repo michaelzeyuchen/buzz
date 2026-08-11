@@ -261,10 +261,16 @@ export function useChannelMessagesQuery(channel: Channel | null) {
   });
 }
 
-export function useChannelSubscription(channel: Channel | null) {
+export function useChannelSubscription(
+  channel: Channel | null,
+  onLiveEvent?: (event: RelayEvent) => void,
+) {
   const queryClient = useQueryClient();
   const channelId = channel?.id ?? null;
   const channelType = channel?.channelType ?? null;
+  const notifyLiveEvent = useEffectEvent((event: RelayEvent) => {
+    onLiveEvent?.(event);
+  });
   const refreshNewestWindow = useEffectEvent(async () => {
     if (!channelId) return;
     await refreshChannelWindowMessages(queryClient, channelId);
@@ -373,6 +379,7 @@ export function useChannelSubscription(channel: Channel | null) {
       .subscribeToChannelLive(channelId, (event) => {
         if (!isDisposed) {
           appendMessage(event);
+          notifyLiveEvent(event);
         }
       })
       .then((dispose) => {
