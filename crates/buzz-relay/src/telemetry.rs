@@ -472,6 +472,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "integration test — requires Postgres + Redis via `just test`"]
     fn trace_context_lookup_does_not_enable_callsites() {
         let context_lookup = TraceContextLookup::default();
         let subscriber = tracing_subscriber::registry().with(

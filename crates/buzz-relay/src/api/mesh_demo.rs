@@ -261,6 +261,7 @@ mod tests {
     /// through the owner-side echo consumer (`recv_validated` + `send_bytes`),
     /// end to end over a real mesh stream pair.
     #[tokio::test]
+    #[ignore = "integration test — requires Postgres + Redis via `just test`"]
     async fn demo_join_forwarded_arm_round_trips_echo() {
         let Some(directory) = redis_directory_if_available().await else {
             return;
