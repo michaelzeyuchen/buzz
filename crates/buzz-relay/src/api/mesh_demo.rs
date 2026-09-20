@@ -146,6 +146,10 @@ fn echo_error(status: StatusCode, what: &str, e: &ReliableStreamError) -> Respon
 
 #[cfg(test)]
 mod tests {
+    //! Ignored tests use lazy Postgres/Redis clients and need live services.
+    //! They are dormant under `just test`, whose integration lane only runs
+    //! test targets from `tests/`; move them there before treating them as CI.
+
     use std::time::Duration;
 
     use axum::body::to_bytes;
@@ -261,7 +265,7 @@ mod tests {
     /// through the owner-side echo consumer (`recv_validated` + `send_bytes`),
     /// end to end over a real mesh stream pair.
     #[tokio::test]
-    #[ignore = "integration test — requires Postgres + Redis via `just test`"]
+    #[ignore]
     async fn demo_join_forwarded_arm_round_trips_echo() {
         let Some(directory) = redis_directory_if_available().await else {
             return;

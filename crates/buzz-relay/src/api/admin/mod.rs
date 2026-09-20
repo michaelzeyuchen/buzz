@@ -327,6 +327,10 @@ fn summarize_body(body: &str, tags: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    //! Ignored tests use lazy Postgres/Redis clients and need live services.
+    //! They are dormant under `just test`, whose integration lane only runs
+    //! test targets from `tests/`; move them there before treating them as CI.
+
     use super::*;
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
@@ -390,7 +394,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "integration test — requires Postgres + Redis via `just test`"]
+    #[ignore]
     async fn report_detail_rejects_unknown_report() {
         let response = router(test_state().await)
             .oneshot(
@@ -421,7 +425,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "integration test — requires Postgres + Redis via `just test`"]
+    #[ignore]
     async fn feedback_attachment_rejects_unknown_feedback() {
         let response = router(test_state().await)
             .oneshot(

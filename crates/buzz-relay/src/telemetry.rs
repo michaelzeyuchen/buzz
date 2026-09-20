@@ -269,6 +269,10 @@ fn classify_exporter_result(
 
 #[cfg(test)]
 mod tests {
+    //! Ignored tests use lazy Postgres/Redis clients and need live services.
+    //! They are dormant under `just test`, whose integration lane only runs
+    //! test targets from `tests/`; move them there before treating them as CI.
+
     use super::*;
     use opentelemetry::{trace::TracerProvider as _, KeyValue};
     use opentelemetry_sdk::trace::InMemorySpanExporter;
@@ -472,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "integration test — requires Postgres + Redis via `just test`"]
+    #[ignore]
     fn trace_context_lookup_does_not_enable_callsites() {
         let context_lookup = TraceContextLookup::default();
         let subscriber = tracing_subscriber::registry().with(
